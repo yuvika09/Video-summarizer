@@ -1,13 +1,10 @@
 from itertools import groupby
 from operator import itemgetter
-from typing import Tuple
+from typing import Tuple, Iterable, List
 
-from typing import Iterable, List
-
-from ortools.algorithms.pywrapknapsack_solver import KnapsackSolver
+from ortools.algorithms.python.knapsack_solver import KnapsackSolver
 
 import torch
-
 
 def seq2bbox(sequence: torch.Tensor) -> torch.Tensor:
     sequence = sequence.bool()
@@ -21,7 +18,6 @@ def seq2bbox(sequence: torch.Tensor) -> torch.Tensor:
 
     bboxes_lr = torch.tensor(bboxes_lr, dtype=torch.int32).to(sequence.device)
     return bboxes_lr
-
 
 def iou_lr(anchor_bbox: torch.Tensor, target_bbox: torch.Tensor) -> torch.Tensor:
     anchor_left, anchor_right = anchor_bbox[:, 0], anchor_bbox[:, 1]
@@ -39,7 +35,6 @@ def iou_lr(anchor_bbox: torch.Tensor, target_bbox: torch.Tensor) -> torch.Tensor
 
     iou = intersect / union
     return iou
-
 
 def nms(scores: torch.Tensor, bboxes: torch.Tensor, thresh: float) -> Tuple[torch.Tensor, torch.Tensor]:
     valid_idx = bboxes[:, 0] < bboxes[:, 1]
@@ -71,7 +66,6 @@ def nms(scores: torch.Tensor, bboxes: torch.Tensor, thresh: float) -> Tuple[torc
 
     return keep_scores, keep_bboxes
 
-
 def get_loc_label(target: torch.Tensor) -> torch.Tensor:
     seq_len, = target.shape
 
@@ -79,7 +73,6 @@ def get_loc_label(target: torch.Tensor) -> torch.Tensor:
     offsets = bbox2offset(bboxes, seq_len)
 
     return offsets
-
 
 def get_ctr_label(target: torch.Tensor, offset: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     target = target.bool()
@@ -91,7 +84,6 @@ def get_ctr_label(target: torch.Tensor, offset: torch.Tensor, eps: float = 1e-8)
 
     return ctr_label
 
-
 def bbox2offset(bboxes: torch.Tensor, seq_len: int) -> torch.Tensor:
     pos_idx = torch.arange(seq_len, dtype=torch.float32).to(bboxes.device)
     offsets = torch.zeros((seq_len, 2), dtype=torch.float32).to(bboxes.device)
@@ -102,7 +94,6 @@ def bbox2offset(bboxes: torch.Tensor, seq_len: int) -> torch.Tensor:
 
     return offsets
 
-
 def offset2bbox(offsets: torch.Tensor) -> torch.Tensor:
     offset_left, offset_right = offsets[:, 0], offsets[:, 1]
     seq_len, _ = offsets.shape
@@ -111,7 +102,6 @@ def offset2bbox(offsets: torch.Tensor) -> torch.Tensor:
     bbox_right = indices + offset_right + 1
     bboxes = torch.stack((bbox_left, bbox_right), dim=1)
     return bboxes
-
 
 def f1_score(pred: torch.Tensor, test: torch.Tensor) -> float:
     assert pred.shape == test.shape
@@ -125,30 +115,33 @@ def f1_score(pred: torch.Tensor, test: torch.Tensor) -> float:
     f1 = 2 * precision * recall / (precision + recall)
     return float(f1)
 
-
 def knapsack(values: Iterable[int],
              weights: Iterable[int],
              capacity: int
              ) -> List[int]:
-    knapsack_solver = KnapsackSolver(
-        KnapsackSolver.KNAPSACK_DYNAMIC_PROGRAMMING_SOLVER, 'test'
+    from ortools.algorithms.python import knapsack_solver
+    
+    solver = knapsack_solver.KnapsackSolver(
+        knapsack_solver.KNAPSACK_DYNAMIC_PROGRAMMING_SOLVER, 'test'
     )
-
+    
     values = list(values)
     weights = list(weights)
     capacity = int(capacity)
-
-    knapsack_solver.Init(values, [weights], [capacity])
-    knapsack_solver.Solve()
-    packed_items = [x for x in range(0, len(weights))
-                    if knapsack_solver.BestSolutionContains(x)]
-
+    
+    # FIXED: lowercase 'init', correct parameter format
+    solver.init(values, [weights], [capacity])
+    solver.solve()  # FIXED: lowercase 'solve'
+    
+    # FIXED: correct method name
+    packed_items = [x for x in range(len(weights)) 
+                    if solver.best_solution_contains(x)]  # lowercase + underscore
+    
     return packed_items
 
 
 def downsample_summ(summ: torch.Tensor) -> torch.Tensor:
     return summ[::15]
-
 
 def get_keyshot_summ(pred: torch.Tensor, cps: torch.Tensor, n_frames: torch.Tensor, nfps: torch.Tensor, picks: torch.Tensor, proportion: float = 0.15):
     assert pred.shape == picks.shape
@@ -174,7 +167,6 @@ def get_keyshot_summ(pred: torch.Tensor, cps: torch.Tensor, n_frames: torch.Tens
 
     return summary, frame_scores
 
-
 def bbox2summary(seq_len: int,
                  pred_cls: torch.Tensor,
                  pred_bboxes: torch.Tensor,
@@ -190,7 +182,6 @@ def bbox2summary(seq_len: int,
     pred_summ, pred_score_upsampled = get_keyshot_summ(score, change_points, n_frames, nfps, picks)
     return pred_summ, pred_score_upsampled
 
-
 def get_summ_diversity(pred_summ: torch.Tensor, features: torch.Tensor) -> float:
     assert len(pred_summ) == len(features)
     pred_summ = pred_summ.bool()
@@ -205,7 +196,6 @@ def get_summ_diversity(pred_summ: torch.Tensor, features: torch.Tensor) -> float
 
     diversity /= len(pos_features) * (len(pos_features) - 1)
     return diversity
-
 
 def get_summ_f1score(pred_summ: torch.Tensor, test_summ: torch.Tensor, eval_metric: str = 'avg') -> float:
     pred_summ = pred_summ.bool()
@@ -227,5 +217,3 @@ def get_summ_f1score(pred_summ: torch.Tensor, test_summ: torch.Tensor, eval_metr
         raise ValueError(f'Invalid eval metric {eval_metric}')
 
     return float(final_f1)
-
-
