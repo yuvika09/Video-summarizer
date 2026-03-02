@@ -1,5 +1,4 @@
 import math
-
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -47,12 +46,9 @@ class MultiHeadAttention(nn.Module):
         Q = self.Q(x)  # [1, seq_len, 1024]
         V = self.V(x)  # [1, seq_len, 1024]
 
-        K = K.view(1, seq_len, self.num_head, self.d_k).permute(2, 0, 1, 3).contiguous().view(self.num_head, seq_len,
-                                                                                              self.d_k)
-        Q = Q.view(1, seq_len, self.num_head, self.d_k).permute(2, 0, 1, 3).contiguous().view(self.num_head, seq_len,
-                                                                                              self.d_k)
-        V = V.view(1, seq_len, self.num_head, self.d_k).permute(2, 0, 1, 3).contiguous().view(self.num_head, seq_len,
-                                                                                              self.d_k)
+        K = K.view(1, seq_len, self.num_head, self.d_k).permute(2, 0, 1, 3).contiguous().view(self.num_head, seq_len, self.d_k)
+        Q = Q.view(1, seq_len, self.num_head, self.d_k).permute(2, 0, 1, 3).contiguous().view(self.num_head, seq_len, self.d_k)
+        V = V.view(1, seq_len, self.num_head, self.d_k).permute(2, 0, 1, 3).contiguous().view(self.num_head, seq_len, self.d_k)
 
         y, attn = self.attention(Q, K, V)  # [num_head, seq_len, d_k]
         y = y.view(1, self.num_head, seq_len, self.d_k).permute(0, 2, 1, 3).contiguous().view(1, seq_len, num_feature)
@@ -106,6 +102,7 @@ class STeMI(nn.Module):
         self.num_hidden = num_hidden
         self.temporal_scales = temporal_scales
         self.spatial_scales = spatial_scales
+
         self.spatial_fc_1 = nn.Linear(num_feature, num_feature)
         self.pos_embed_1 = nn.Parameter(torch.zeros(1, 1, 32))
         self.pos_embed_2 = nn.Parameter(torch.zeros(1, 1, 32))
@@ -135,18 +132,26 @@ class STeMI(nn.Module):
         self.fc_loc = nn.Linear(num_hidden, 2)
         self.fc_ctr = nn.Linear(num_hidden, 1)
 
+        # Define learnable weights for merging
+        self.temporal_weight = nn.Parameter(torch.ones(1))
+        self.spatial_weight = nn.Parameter(torch.ones(1))
+
     def forward(self, x, support_feature, support_target):
         support_target = support_target.squeeze(0)
         support_summary = support_feature[:, support_target, :]
+
         spatial_support_feature = support_feature.clone()
         spatial_support_feature += self.pos_embed_1.repeat(1, 32, 1).transpose(1, 2).reshape([1, 1, 1024])
         spatial_support_feature = self.spatial_fc_1(spatial_support_feature)
+
         spatial_support_summary = support_summary.clone()
         spatial_support_summary += self.pos_embed_2.repeat(1, 32, 1).transpose(1, 2).reshape([1, 1, 1024])
         spatial_support_summary = self.spatial_fc_1(spatial_support_summary)
+
         spatial_x = x.clone()
         spatial_x += self.pos_embed_3.repeat(1, 32, 1).transpose(1, 2).reshape([1, 1, 1024])
         spatial_x = self.spatial_fc_1(spatial_x)
+
         support_feat_out = spatial_support_feature.view(spatial_support_feature.shape[0], spatial_support_feature.shape[1], 32, 32)
         support_summary_out = spatial_support_summary.view(spatial_support_summary.shape[0], spatial_support_summary.shape[1], 32, 32)
         x_out = spatial_x.view(spatial_x.shape[0], spatial_x.shape[1], 32, 32)
@@ -159,12 +164,13 @@ class STeMI(nn.Module):
         for i in range(self.spatial_scales):
             if i > 0:
                 height = int(height / 2)
-                adapt_pool_sfo = nn.AdaptiveAvgPool2d((x_out.shape[2], height)).to(x.device)
-                adapt_pool_sso = nn.AdaptiveAvgPool2d((x_out.shape[2], height)).to(x.device)
-                adapt_pool_xot = nn.AdaptiveAvgPool2d((x_out.shape[2], height)).to(x.device)
-                support_feat_out = adapt_pool_sfo(support_feat_out)
-                support_summary_out = adapt_pool_sso(support_summary_out)
-                x_out = adapt_pool_xot(x_out)
+            adapt_pool_sfo = nn.AdaptiveAvgPool2d((x_out.shape[2], height)).to(x.device)
+            adapt_pool_sso = nn.AdaptiveAvgPool2d((x_out.shape[2], height)).to(x.device)
+            adapt_pool_xot = nn.AdaptiveAvgPool2d((x_out.shape[2], height)).to(x.device)
+            support_feat_out = adapt_pool_sfo(support_feat_out)
+            support_summary_out = adapt_pool_sso(support_summary_out)
+            x_out = adapt_pool_xot(x_out)
+            
             merge_scale = torch.cat([support_feat_out, support_summary_out, x_out], 1)
             input_channels = support_feat_out.shape[1] + support_summary_out.shape[1] + x_out.shape[1]
             feature_compress = nn.Sequential(
@@ -173,6 +179,7 @@ class STeMI(nn.Module):
             ).to(x.device)
             compress_merge = feature_compress(merge_scale)
             merge_scales_space.append(compress_merge)
+
         merge_scales_all_space = torch.cat(merge_scales_space, 3)
         merge_scales_all_space = F.interpolate(merge_scales_all_space, size=(merge_scales_all_space.shape[2], merge_scales_all_space.shape[2]))
         merge_scales_all_space = merge_scales_all_space.view(merge_scales_all_space.shape[0], merge_scales_all_space.shape[1], 1024)
@@ -185,6 +192,7 @@ class STeMI(nn.Module):
         _, _, dim = support_strengthen.shape
         fc_1 = nn.Linear(dim, self.num_feature).to(x.device)
         support_updim = fc_1(support_strengthen)
+        
         x_out = self.attention(x)
         x_out = x_out + x
 
@@ -194,26 +202,40 @@ class STeMI(nn.Module):
         row_sup = support_updim.shape[1]
         row_xot = x_out.shape[1]
         column = support_feature.shape[2]
+        
         for i in range(self.temporal_scales):
             adapt_pool_sfo = nn.AdaptiveAvgPool2d((row_sfo, column)).to(x.device)
             adapt_pool_sso = nn.AdaptiveAvgPool2d((row_sso, column)).to(x.device)
             adapt_pool_sup = nn.AdaptiveAvgPool2d((row_sup, column)).to(x.device)
             adapt_pool_xot = nn.AdaptiveAvgPool2d((row_xot, column)).to(x.device)
+            
             sfo_scale = adapt_pool_sfo(support_feat_out).unsqueeze(0)
             sso_scale = adapt_pool_sso(support_summary_out).unsqueeze(0)
             sup_scale = adapt_pool_sup(support_updim).unsqueeze(0)
             xot_scale = adapt_pool_xot(x_out).unsqueeze(0)
+            
             merge_scale = torch.cat([sfo_scale, sso_scale, sup_scale, xot_scale], 2)
             merge_scale = F.interpolate(merge_scale, size=(x.shape[1], x.shape[2]))
             merge_scales_tpl.append(merge_scale)
+            
             row_sfo = int(row_sfo / 2)
             row_sso = int(row_sso / 2)
             row_sup = int(row_sup / 2)
             row_xot = int(row_xot / 2)
+            
         merge_scales_tpl = torch.stack(merge_scales_tpl, dim=2)
         merge_scales_all_tpl = torch.mean(merge_scales_tpl, 2)
         merge_scales_all_tpl = merge_scales_all_tpl.squeeze(0)
-        merge_scales_all = torch.cat([merge_scales_all_tpl, merge_scales_all_space], 2)    # 横向拼接
+        
+        merge_scales_all = torch.cat([merge_scales_all_tpl, merge_scales_all_space], 2)
+
+        # Apply learnable weights
+        weighted_temporal = self.temporal_weight * merge_scales_all_tpl
+        weighted_spatial = self.spatial_weight * merge_scales_all_space
+
+        # Combine weighted features
+        merge_scales_all = torch.cat([weighted_temporal, weighted_spatial], 2)
+
         _, _, dim_merge = merge_scales_all.shape
         fc_2 = nn.Linear(dim_merge, self.num_feature).to(x.device)
         merge_balance_dim = fc_2(merge_scales_all)
