@@ -16,13 +16,24 @@ logger = logging.getLogger()
 
 
 def train(args, split, save_path):
-    model = STeMI(num_feature=args.num_feature, num_hidden=args.num_hidden, num_head=args.num_head,
-                    temporal_scales=args.temporal_scales, spatial_scales=args.spatial_scales)
+    # Updated to include dropout parameter
+    model = STeMI(
+        num_feature=args.num_feature,
+        num_hidden=args.num_hidden,
+        num_head=args.num_head,
+        temporal_scales=args.temporal_scales,
+        spatial_scales=args.spatial_scales,
+        dropout=args.dropout
+    )
     model = model.to(args.device)
     model.train()
 
     parameters = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.Adam(parameters, lr=args.lr, weight_decay=args.weight_decay)
+    
+    # Learning rate scheduler for better convergence
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.max_epoch, eta_min=1e-6)
+    
     max_val_fscore = -1
     train_set = data_loader.VideoDataset(split['train_keys'])
     train_loader = data_loader.DataLoader(train_set, shuffle=True)
@@ -32,6 +43,9 @@ def train(args, split, save_path):
     for epoch in range(args.max_epoch):
         random.seed(epoch + args.seed)
         model.train()
+        epoch_loss = 0.0
+        num_batches = 0
+        
         for _, seq, gtscore, change_points, n_frames, nfps, picks, _, _, support_video in train_loader:
 
             gtscore = torch.tensor(gtscore, dtype=torch.float32).to(args.device)
@@ -76,7 +90,20 @@ def train(args, split, save_path):
 
             optimizer.zero_grad()
             loss.backward()
+            
+            # Gradient clipping to prevent exploding gradients
+            torch.nn.utils.clip_grad_norm_(parameters, max_norm=1.0)
+            
             optimizer.step()
+            
+            epoch_loss += loss.item()
+            num_batches += 1
+
+        # Step the scheduler
+        scheduler.step()
+        
+        # Calculate average epoch loss
+        avg_epoch_loss = epoch_loss / max(num_batches, 1)
 
         val_fscore, _ = evaluate(model, val_loader, args.nms_thresh, args.device)
 
@@ -85,7 +112,9 @@ def train(args, split, save_path):
             torch.save(model.state_dict(), str(save_path))
 
         logger.info(f'Epoch: {epoch}/{args.max_epoch}\t'
-                    f'F-score cur/max: {val_fscore:.4f}/{max_val_fscore:.4f}\t')
+                    f'Loss: {avg_epoch_loss:.4f}\t'
+                    f'LR: {scheduler.get_last_lr()[0]:.6f}\t'
+                    f'F-score cur/max: {val_fscore:.4f}/{max_val_fscore:.4f}')
 
     return max_val_fscore
 

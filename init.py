@@ -55,6 +55,9 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument('--lambda_rec_x', type=float, default=1.0)
     parser.add_argument('--lambda_rec_s', type=float, default=1.0)
 
+    # New parameters
+    parser.add_argument('--dropout', type=float, default=0.5)
+
     return parser
 
 

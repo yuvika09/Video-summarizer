@@ -1,4 +1,5 @@
 import math
+
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -7,9 +8,9 @@ import vs_helper
 
 
 class ScaledDotProductAttention(nn.Module):
-    def __init__(self, d_k):
+    def __init__(self, d_k, dropout=0.5):
         super().__init__()
-        self.dropout = nn.Dropout(0.5)
+        self.dropout = nn.Dropout(dropout)
         self.sqrt_d_k = math.sqrt(d_k)
 
     def forward(self, Q, K, V):
@@ -24,7 +25,7 @@ class ScaledDotProductAttention(nn.Module):
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, num_head=8, num_feature=1024):
+    def __init__(self, num_head=8, num_feature=1024, dropout=0.5):
         super().__init__()
         self.num_head = num_head
 
@@ -33,24 +34,24 @@ class MultiHeadAttention(nn.Module):
         self.V = nn.Linear(num_feature, num_feature, bias=False)
 
         self.d_k = num_feature // num_head
-        self.attention = ScaledDotProductAttention(self.d_k)
+        self.attention = ScaledDotProductAttention(self.d_k, dropout)
 
         self.fc = nn.Sequential(
             nn.Linear(num_feature, num_feature, bias=False),
-            nn.Dropout(0.5)
+            nn.Dropout(dropout)
         )
 
     def forward(self, x):
-        _, seq_len, num_feature = x.shape  # [1, seq_len, 1024]
-        K = self.K(x)  # [1, seq_len, 1024]
-        Q = self.Q(x)  # [1, seq_len, 1024]
-        V = self.V(x)  # [1, seq_len, 1024]
+        _, seq_len, num_feature = x.shape
+        K = self.K(x)
+        Q = self.Q(x)
+        V = self.V(x)
 
         K = K.view(1, seq_len, self.num_head, self.d_k).permute(2, 0, 1, 3).contiguous().view(self.num_head, seq_len, self.d_k)
         Q = Q.view(1, seq_len, self.num_head, self.d_k).permute(2, 0, 1, 3).contiguous().view(self.num_head, seq_len, self.d_k)
         V = V.view(1, seq_len, self.num_head, self.d_k).permute(2, 0, 1, 3).contiguous().view(self.num_head, seq_len, self.d_k)
 
-        y, attn = self.attention(Q, K, V)  # [num_head, seq_len, d_k]
+        y, attn = self.attention(Q, K, V)
         y = y.view(1, self.num_head, seq_len, self.d_k).permute(0, 2, 1, 3).contiguous().view(1, seq_len, num_feature)
 
         y = self.fc(y)
@@ -71,7 +72,8 @@ def weights_init(m):
     classname = m.__class__.__name__
     if classname.find('Linear') != -1:
         m.weight.data.normal_(0.0, 0.02)
-        m.bias.data.fill_(0)
+        if m.bias is not None:
+            m.bias.data.fill_(0)
     elif classname.find('BatchNorm') != -1:
         m.weight.data.normal_(1.0, 0.02)
         m.bias.data.fill_(0)
@@ -93,16 +95,132 @@ class Reconstruction(nn.Module):
         return out
 
 
+class CrossAttention(nn.Module):
+    """Cross-attention module for feature interaction"""
+    def __init__(self, num_feature, num_head=8, dropout=0.5):
+        super(CrossAttention, self).__init__()
+        self.num_head = num_head
+        self.d_k = num_feature // num_head
+        
+        self.W_q = nn.Linear(num_feature, num_feature, bias=False)
+        self.W_k = nn.Linear(num_feature, num_feature, bias=False)
+        self.W_v = nn.Linear(num_feature, num_feature, bias=False)
+        self.W_o = nn.Linear(num_feature, num_feature, bias=False)
+        
+        self.dropout = nn.Dropout(dropout)
+        self.layer_norm = nn.LayerNorm(num_feature)
+        self.scale = math.sqrt(self.d_k)
+        
+    def forward(self, query, key_value):
+        batch_size, seq_len, _ = query.shape
+        
+        Q = self.W_q(query)
+        K = self.W_k(key_value)
+        V = self.W_v(key_value)
+        
+        # Reshape for multi-head attention
+        Q = Q.view(batch_size, seq_len, self.num_head, self.d_k).transpose(1, 2)
+        K = K.view(batch_size, -1, self.num_head, self.d_k).transpose(1, 2)
+        V = V.view(batch_size, -1, self.num_head, self.d_k).transpose(1, 2)
+        
+        # Attention scores
+        attn = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
+        attn = F.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+        
+        # Apply attention to values
+        out = torch.matmul(attn, V)
+        out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
+        out = self.W_o(out)
+        
+        # Residual connection and layer norm
+        out = self.layer_norm(out + query)
+        
+        return out
+
+
+class GatedFusion(nn.Module):
+    """Enhanced Gated Fusion module with residual connection"""
+    def __init__(self, num_feature, dropout=0.5):
+        super(GatedFusion, self).__init__()
+        self.gate_temporal = nn.Sequential(
+            nn.Linear(num_feature * 2, num_feature),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(num_feature, num_feature),
+            nn.Sigmoid()
+        )
+        self.gate_spatial = nn.Sequential(
+            nn.Linear(num_feature * 2, num_feature),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(num_feature, num_feature),
+            nn.Sigmoid()
+        )
+        self.fusion_fc = nn.Sequential(
+            nn.Linear(num_feature, num_feature),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.LayerNorm(num_feature)
+        )
+        self.apply(weights_init)
+
+    def forward(self, temporal_features, spatial_features):
+        concat_features = torch.cat([temporal_features, spatial_features], dim=-1)
+        
+        # Compute separate gates for temporal and spatial
+        gate_t = self.gate_temporal(concat_features)
+        gate_s = self.gate_spatial(concat_features)
+        
+        # Apply gating with normalization
+        gated_temporal = gate_t * temporal_features
+        gated_spatial = gate_s * spatial_features
+        
+        # Combine and refine
+        fused = gated_temporal + gated_spatial
+        fused = self.fusion_fc(fused)
+        
+        return fused
+
+
+class FeatureEnhancer(nn.Module):
+    """Feature enhancement module with self-attention and FFN"""
+    def __init__(self, num_feature, dropout=0.5):
+        super(FeatureEnhancer, self).__init__()
+        self.self_attn = nn.MultiheadAttention(num_feature, num_heads=8, dropout=dropout, batch_first=True)
+        self.ffn = nn.Sequential(
+            nn.Linear(num_feature, num_feature * 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(num_feature * 4, num_feature),
+            nn.Dropout(dropout)
+        )
+        self.norm1 = nn.LayerNorm(num_feature)
+        self.norm2 = nn.LayerNorm(num_feature)
+        
+    def forward(self, x):
+        # Self-attention with residual
+        attn_out, _ = self.self_attn(x, x, x)
+        x = self.norm1(x + attn_out)
+        
+        # FFN with residual
+        ffn_out = self.ffn(x)
+        x = self.norm2(x + ffn_out)
+        
+        return x
+
+
 class STeMI(nn.Module):
-    def __init__(self, num_feature, num_hidden, num_head, temporal_scales, spatial_scales):
+    def __init__(self, num_feature, num_hidden, num_head, temporal_scales, spatial_scales, dropout=0.5):
         super().__init__()
-        self.attention = AttentionExtractor(num_head, num_feature)
+        self.attention = AttentionExtractor(num_head, num_feature, dropout)
         self.layer_norm = nn.LayerNorm(num_feature)
         self.num_feature = num_feature
         self.num_hidden = num_hidden
         self.temporal_scales = temporal_scales
         self.spatial_scales = spatial_scales
-
+        self.dropout = dropout
+        
         self.spatial_fc_1 = nn.Linear(num_feature, num_feature)
         self.pos_embed_1 = nn.Parameter(torch.zeros(1, 1, 32))
         self.pos_embed_2 = nn.Parameter(torch.zeros(1, 1, 32))
@@ -117,14 +235,14 @@ class STeMI(nn.Module):
         self.fc1 = nn.Sequential(
             nn.Linear(num_feature, num_hidden),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.5),
+            nn.Dropout(dropout),
             nn.LayerNorm(num_hidden)
         )
 
         self.merge_extractor = nn.Sequential(
             nn.Linear(num_feature, num_feature),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.5),
+            nn.Dropout(dropout),
             nn.LayerNorm(num_feature)
         )
 
@@ -132,26 +250,28 @@ class STeMI(nn.Module):
         self.fc_loc = nn.Linear(num_hidden, 2)
         self.fc_ctr = nn.Linear(num_hidden, 1)
 
-        # Define learnable weights for merging
-        self.temporal_weight = nn.Parameter(torch.ones(1))
-        self.spatial_weight = nn.Parameter(torch.ones(1))
+        # Cross-attention modules
+        self.cross_attn_t2s = CrossAttention(num_feature, num_head, dropout)
+        self.cross_attn_s2t = CrossAttention(num_feature, num_head, dropout)
+        
+        # Gated Fusion module
+        self.gated_fusion = GatedFusion(num_feature, dropout)
+        
+        # Feature enhancer for final features
+        self.feature_enhancer = FeatureEnhancer(num_feature, dropout)
 
     def forward(self, x, support_feature, support_target):
         support_target = support_target.squeeze(0)
         support_summary = support_feature[:, support_target, :]
-
         spatial_support_feature = support_feature.clone()
         spatial_support_feature += self.pos_embed_1.repeat(1, 32, 1).transpose(1, 2).reshape([1, 1, 1024])
         spatial_support_feature = self.spatial_fc_1(spatial_support_feature)
-
         spatial_support_summary = support_summary.clone()
         spatial_support_summary += self.pos_embed_2.repeat(1, 32, 1).transpose(1, 2).reshape([1, 1, 1024])
         spatial_support_summary = self.spatial_fc_1(spatial_support_summary)
-
         spatial_x = x.clone()
         spatial_x += self.pos_embed_3.repeat(1, 32, 1).transpose(1, 2).reshape([1, 1, 1024])
         spatial_x = self.spatial_fc_1(spatial_x)
-
         support_feat_out = spatial_support_feature.view(spatial_support_feature.shape[0], spatial_support_feature.shape[1], 32, 32)
         support_summary_out = spatial_support_summary.view(spatial_support_summary.shape[0], spatial_support_summary.shape[1], 32, 32)
         x_out = spatial_x.view(spatial_x.shape[0], spatial_x.shape[1], 32, 32)
@@ -164,13 +284,12 @@ class STeMI(nn.Module):
         for i in range(self.spatial_scales):
             if i > 0:
                 height = int(height / 2)
-            adapt_pool_sfo = nn.AdaptiveAvgPool2d((x_out.shape[2], height)).to(x.device)
-            adapt_pool_sso = nn.AdaptiveAvgPool2d((x_out.shape[2], height)).to(x.device)
-            adapt_pool_xot = nn.AdaptiveAvgPool2d((x_out.shape[2], height)).to(x.device)
-            support_feat_out = adapt_pool_sfo(support_feat_out)
-            support_summary_out = adapt_pool_sso(support_summary_out)
-            x_out = adapt_pool_xot(x_out)
-            
+                adapt_pool_sfo = nn.AdaptiveAvgPool2d((x_out.shape[2], height)).to(x.device)
+                adapt_pool_sso = nn.AdaptiveAvgPool2d((x_out.shape[2], height)).to(x.device)
+                adapt_pool_xot = nn.AdaptiveAvgPool2d((x_out.shape[2], height)).to(x.device)
+                support_feat_out = adapt_pool_sfo(support_feat_out)
+                support_summary_out = adapt_pool_sso(support_summary_out)
+                x_out = adapt_pool_xot(x_out)
             merge_scale = torch.cat([support_feat_out, support_summary_out, x_out], 1)
             input_channels = support_feat_out.shape[1] + support_summary_out.shape[1] + x_out.shape[1]
             feature_compress = nn.Sequential(
@@ -179,7 +298,6 @@ class STeMI(nn.Module):
             ).to(x.device)
             compress_merge = feature_compress(merge_scale)
             merge_scales_space.append(compress_merge)
-
         merge_scales_all_space = torch.cat(merge_scales_space, 3)
         merge_scales_all_space = F.interpolate(merge_scales_all_space, size=(merge_scales_all_space.shape[2], merge_scales_all_space.shape[2]))
         merge_scales_all_space = merge_scales_all_space.view(merge_scales_all_space.shape[0], merge_scales_all_space.shape[1], 1024)
@@ -192,7 +310,6 @@ class STeMI(nn.Module):
         _, _, dim = support_strengthen.shape
         fc_1 = nn.Linear(dim, self.num_feature).to(x.device)
         support_updim = fc_1(support_strengthen)
-        
         x_out = self.attention(x)
         x_out = x_out + x
 
@@ -202,44 +319,37 @@ class STeMI(nn.Module):
         row_sup = support_updim.shape[1]
         row_xot = x_out.shape[1]
         column = support_feature.shape[2]
-        
         for i in range(self.temporal_scales):
             adapt_pool_sfo = nn.AdaptiveAvgPool2d((row_sfo, column)).to(x.device)
             adapt_pool_sso = nn.AdaptiveAvgPool2d((row_sso, column)).to(x.device)
             adapt_pool_sup = nn.AdaptiveAvgPool2d((row_sup, column)).to(x.device)
             adapt_pool_xot = nn.AdaptiveAvgPool2d((row_xot, column)).to(x.device)
-            
             sfo_scale = adapt_pool_sfo(support_feat_out).unsqueeze(0)
             sso_scale = adapt_pool_sso(support_summary_out).unsqueeze(0)
             sup_scale = adapt_pool_sup(support_updim).unsqueeze(0)
             xot_scale = adapt_pool_xot(x_out).unsqueeze(0)
-            
             merge_scale = torch.cat([sfo_scale, sso_scale, sup_scale, xot_scale], 2)
             merge_scale = F.interpolate(merge_scale, size=(x.shape[1], x.shape[2]))
             merge_scales_tpl.append(merge_scale)
-            
             row_sfo = int(row_sfo / 2)
             row_sso = int(row_sso / 2)
             row_sup = int(row_sup / 2)
             row_xot = int(row_xot / 2)
-            
         merge_scales_tpl = torch.stack(merge_scales_tpl, dim=2)
         merge_scales_all_tpl = torch.mean(merge_scales_tpl, 2)
         merge_scales_all_tpl = merge_scales_all_tpl.squeeze(0)
+
+        # Apply Cross-Attention between temporal and spatial features
+        enhanced_temporal = self.cross_attn_t2s(merge_scales_all_tpl, merge_scales_all_space)
+        enhanced_spatial = self.cross_attn_s2t(merge_scales_all_space, merge_scales_all_tpl)
+
+        # Apply Gated Fusion
+        fused_features = self.gated_fusion(enhanced_temporal, enhanced_spatial)
         
-        merge_scales_all = torch.cat([merge_scales_all_tpl, merge_scales_all_space], 2)
+        # Enhance fused features
+        fused_features = self.feature_enhancer(fused_features)
 
-        # Apply learnable weights
-        weighted_temporal = self.temporal_weight * merge_scales_all_tpl
-        weighted_spatial = self.spatial_weight * merge_scales_all_space
-
-        # Combine weighted features
-        merge_scales_all = torch.cat([weighted_temporal, weighted_spatial], 2)
-
-        _, _, dim_merge = merge_scales_all.shape
-        fc_2 = nn.Linear(dim_merge, self.num_feature).to(x.device)
-        merge_balance_dim = fc_2(merge_scales_all)
-        merge_x = self.merge_extractor(merge_balance_dim)
+        merge_x = self.merge_extractor(fused_features)
         out = self.fc1(merge_x)
 
         _, seq_len, _ = x.shape
