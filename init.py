@@ -3,16 +3,13 @@ import datetime
 import logging
 import random
 from pathlib import Path
-
 import numpy as np
 import torch
-
 
 def set_random_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-
 
 def init_logger(log_dir: str) -> None:
     logger = logging.getLogger()
@@ -29,7 +26,6 @@ def init_logger(log_dir: str) -> None:
     fh = logging.FileHandler(str(log_dir / now_time))
     fh.setFormatter(logging.Formatter(format_str))
     logger.addHandler(fh)
-
 
 def get_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
@@ -54,12 +50,8 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument('--lambda-ctr', type=float, default=1.0)
     parser.add_argument('--lambda_rec_x', type=float, default=1.0)
     parser.add_argument('--lambda_rec_s', type=float, default=1.0)
-
-    # New parameters
-    parser.add_argument('--dropout', type=float, default=0.5)
-
+    parser.add_argument('--dropout', type=float, default=0.5)  # Add dropout parameter
     return parser
-
 
 def get_arguments() -> argparse.Namespace:
     parser = get_parser()

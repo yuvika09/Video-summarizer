@@ -1,10 +1,7 @@
 import random
 from pathlib import Path
-
 import logging
-
 import torch
-
 import vs_helper
 import data_loader
 import init
@@ -13,7 +10,6 @@ from evaluate import evaluate
 from losses import calc_ctr_loss, calc_cls_loss, calc_loc_loss, reconstruction_loss
 
 logger = logging.getLogger()
-
 
 def train(args, split, save_path):
     # Updated to include dropout parameter
@@ -56,11 +52,9 @@ def train(args, split, save_path):
             keyshot_summ, _ = vs_helper.get_keyshot_summ(gtscore, change_points, n_frames, nfps, picks)
             target = vs_helper.downsample_summ(keyshot_summ)
             support_video["gtscore"] = torch.tensor(support_video["gtscore"], dtype=torch.float32).to(args.device)
-            support_video["change_points"] = torch.tensor(support_video["change_points"], dtype=torch.int64).to(
-                args.device)
+            support_video["change_points"] = torch.tensor(support_video["change_points"], dtype=torch.int64).to(args.device)
             support_video["n_frames"] = torch.tensor(support_video["n_frames"], dtype=torch.int64).to(args.device)
-            support_video["n_frame_per_seg"] = torch.tensor(support_video["n_frame_per_seg"], dtype=torch.int64).to(
-                args.device)
+            support_video["n_frame_per_seg"] = torch.tensor(support_video["n_frame_per_seg"], dtype=torch.int64).to(args.device)
             support_video["picks"] = torch.tensor(support_video["picks"], dtype=torch.int64).to(args.device)
             support_keyshot_summ, _ = vs_helper.get_keyshot_summ(support_video["gtscore"],
                                                                 support_video["change_points"],
@@ -118,7 +112,6 @@ def train(args, split, save_path):
 
     return max_val_fscore
 
-
 def main():
     args = init.get_arguments()
     init.init_logger(args.model_dir)
@@ -150,7 +143,6 @@ def main():
         data_loader.dump_yaml(results, model_dir / f'{split_path.stem}.yml')
 
         logger.info(f'Training done on {split_path.stem}. F-score: {stats.fscore:.4f}')
-
 
 if __name__ == '__main__':
     main()
