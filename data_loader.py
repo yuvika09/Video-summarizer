@@ -7,9 +7,9 @@ from typing import Any, List, Dict
 import h5py
 import numpy as np
 import yaml
+import torch
 
 logger = logging.getLogger()
-
 
 class VideoDataset(object):
     def __init__(self, keys: List[str]):
